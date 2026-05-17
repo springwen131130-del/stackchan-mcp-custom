@@ -1,0 +1,87 @@
+name: Firmware Release
+
+on:
+  push:
+    tags:
+      - "firmware-v*"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build firmware
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Configure WebSocket URL override
+        working-directory: firmware
+        run: |
+          cat > sdkconfig.defaults.local <<'LOCAL_EOF'
+          CONFIG_DEFAULT_WEBSOCKET_URL="ws://192.168.101.101:8765/"
+          CONFIG_FORCE_DEFAULT_WEBSOCKET_URL=y
+          LOCAL_EOF
+
+      - name: Build firmware with ESP-IDF Docker image
+        working-directory: firmware
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD":/project \
+            -w /project \
+            espressif/idf:v5.5.2 \
+            python ./scripts/release.py stackchan
+
+      - name: Verify firmware artifacts
+        run: |
+          set -euo pipefail
+          test -f firmware/build/merged-binary.bin
+          test -f firmware/build/xiaozhi.bin
+          ls firmware/releases/v*_stackchan.zip
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stackchan-firmware-${{ github.sha }}
+          retention-days: 14
+          path: |
+            firmware/build/merged-binary.bin
+            firmware/build/xiaozhi.bin
+            firmware/releases/v*_stackchan.zip
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/firmware-v')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: stackchan-firmware-${{ github.sha }}
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "Firmware ${{ github.ref_name }}" \
+            merged-binary.bin xiaozhi.bin releases/v*_stackchan.zip
